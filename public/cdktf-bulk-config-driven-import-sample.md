@@ -5,7 +5,7 @@ tags:  AWS IaC Terraform CDKTF Import
 
 
 ---
-title: CDKTFのconfig-driven-importでS3バケットを一括インポートしてみた
+title: CDKTF の config-driven-import で S3 バケットを一括インポートしてみた
 tags:
   - 'AWS'
   - 'IaC'
@@ -20,13 +20,41 @@ slide: false
 ignorePublish: false
 ---
 
-# stash
+# 調査
 
-- [ ] バケットの構成を変える
+## AwsSdkCallでListBucketsを呼び出せないか
+
+- [javascript - Correct way to use AWS SDK within AWS CDK - Stack Overflow](https://stackoverflow.com/questions/59406959/correct-way-to-use-aws-sdk-within-aws-cdk)
+- [interface AwsSdkCall · AWS CDK](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.custom_resources.AwsSdkCall.html)
+- [AwsSdkCall インターフェイスを使用して SDK 呼び出しを行う | AWS re:Post](https://repost.aws/ja/knowledge-center/cdk-sdk-calls-awssdkcall)
+- [[AWS CDK] APIを呼び出すだけのカスタムリソースならLambda関数は不要な件 | DevelopersIO](https://dev.classmethod.jp/articles/create-custom-resources-with-aws-cdk-without-using-lambda-functions/)
+- [AWS CDKで別リージョンにスタックをデプロイしてパラメータをリージョン間で受け渡す方法 －AWS CDKカスタムリソースの実装例 - NRIネットコムBlog](https://tech.nri-net.com/entry/aws_cdk_cross_region_stack_deployment_method)
+
+### CloudFormationのカスタムリソースとは
+
+- [AWS CloudFormationのカスタムリソースでRDSやElasticsearchをアップデートする仕組みを作る - Cybozu Inside Out | サイボウズエンジニアのブログ](https://blog.cybozu.io/entry/2019/06/19/080000)
+- [CloudFormationカスタムリソースを学ぶ](https://zenn.dev/dehio3/articles/f449b3ed652aad)
+
+## Terraformのインポートブロックで実現できないか
+
+- [Terraform 1.5 で追加される import ブロックの使い方](https://zenn.dev/kou_pg_0131/articles/tf-import-block)
+- [Terraform 1.6 adds a test framework for enhanced code validation](https://www.hashicorp.com/blog/terraform-1-6-adds-a-test-framework-for-enhanced-code-validation)
+- [Import - Configuration Language | Terraform | HashiCorp Developer](https://developer.hashicorp.com/terraform/language/import#examples)
+
+## CDKのConstructをCDKTFから呼び出す
+
+https://dev.classmethod.jp/articles/cdk-for-terraform-aws-adapter-aws-cdk-construct/
+
+## どうやればStackにバケット名リストを渡せるか？
+
+- [cdktfドキュメント翻訳](https://zenn.dev/uta_mory/scraps/98d7236c185dde)
+- [CDK for TerraformでGoogle Cloudのリソースを作ってみた 発動篇](https://zenn.dev/cloud_ace/articles/cdk-for-terraform-functions)
+
+---
 
 # はじめに
 
-CDKTFでconfig-driven-importがサポートされました。
+CDKTF で config-driven-import がサポートされました。
 
 https://www.hashicorp.com/blog/cdktf-0-19-adds-support-for-config-driven-import-and-refactoring
 
@@ -34,23 +62,28 @@ https://www.hashicorp.com/blog/cdktf-0-19-adds-support-for-config-driven-import-
 
 https://dev.classmethod.jp/articles/cdktf-config-driven-import/
 
-AWS SDKでリソースを列挙するコードを書けば、一括インポートが可能なのではないか、と思い試してみることにしまいた。
+AWS SDK でリソースを列挙するコードを書けば、一括インポートが可能なのではないか、と思い試してみることにしまいた。
 
 # CDKTFとは
+
+https://developer.hashicorp.com/terraform/cdktf
 
 # config-driven-importとは
 
 
 # 複数バケットを用意する
 
-まず、複数バケットを同じ構成で作成します。
+まず、複数バケットを作成します。Web サイト用バケットのみバージョニングを有効化します。
 
 ```bash
 export AWS_PROFILE=<profile name>
 
-# Webサイトホスティング用バケット
+# Webサイト用バケット
 BUCKET_NAME="cdktf-test-web-20231024"
 aws s3api create-bucket --bucket $BUCKET_NAME --create-bucket-configuration LocationConstraint=ap-northeast-1
+
+# バージョンニングを有効化
+aws s3api put-bucket-versioning --bucket $BUCKET_NAME --versioning-configuration Status=Enabled
 
 # ログ用バケット
 BUCKET_NAME="cdktf-test-log-20231024"
@@ -66,17 +99,87 @@ aws s3api create-bucket --bucket $BUCKET_NAME --create-bucket-configuration Loca
 }
 ```
 
-# 複数のバケットを一括インポートする（バケット名ハードコード）
+# CDKTFプロジェクトを初期化する
+
+プロジェクトを初期化します。
+
+```bash
+mkdir bulk-import-sample
+cd bulk-import-sample
+cdktf init --template="typescript" --providers="aws@~>5.0" --local
+```
+
+解説については、こちらをご参照ください。
+
+https://qiita.com/JHashimoto/items/81c938d1a0574f1fa34c
+
+# 複数のバケットを一括インポートする（Data Source使用）
+
+複数バケットをサポートする Data Source はない。
+
+https://stackoverflow.com/questions/72483512/terraform-data-block-all-buckets
+
+単一バケットのみサポートしている。
+
+https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/s3_bucket?lang=typescript
+
+# 複数のバケットを一括インポートする（Input Variableの値をハードコードで外部から渡す）
+
+インポートではなく、Create する plan が出力される。
+
+```bash
+cdktf diff --var 'bucket_names=["cdktf-tes
+t-web-20231024","cdktf-test-log-20231024"]'
+...
+                      Terraform will perform the following actions:
+config-driven-import    # aws_s3_bucket.bucket (bucket)["cdktf-test-log-20231024"] will be created
+...
+                      Plan: 2 to add, 0 to change, 0 to destroy.
+...
+```
+
+インポートします。
+
+```bash
+cdktf deploy --var 'bucket_names=["cdktf-t
+est-web-20231024","cdktf-test-log-20231024"]'
+...
+                      Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+
+No outputs found.
+```
+
+# 複数のバケットを一括インポートする（Input Variableの値をAWS CLIで外部から渡す）
+
+インポートではなく、Create する plan が出力される。
+
+```bash
+BUCKET_NAMES_JSON=$(aws s3api list-buckets --query "Buckets[?starts_with(Name,'cdktf-test-')].Name" --output json)
+echo $BUCKET_NAMES_JSON 
+# [ "cdktf-test-log-20231024", "cdktf-test-web-20231024" ]
+cdktf diff --var "bucket_names=$BUCKET_NAMES_JSON"
+```
+
+## 参考
+
+https://github.com/jcolemorrison/ecs-microservices-cdktf/tree/main
+
+# 複数のバケットを一括インポートする（AWS SDK使用）
 
 バケットを一括でインポートしてみます。
 
-まず、最も簡単と思われる、バケット名をハードコードする方法で実装します。
+- [ ] `cdktf diff`で`no changes.`が出力される。レスポンスの前にコンストラクタのスコープを抜けていないか？
+- [ ] AWSSDKCall を試してみる
+  * [AwsSdkCall インターフェイスを使用した SDK 呼び出しの実行 |AWS re:Post](https://repost.aws/knowledge-center/cdk-sdk-calls-awssdkcall)
+  * [javascript - AWS CDK 内で AWS SDK を使用する正しい方法 - スタックオーバーフロー](https://stackoverflow.com/questions/59406959/correct-way-to-use-aws-sdk-within-aws-cdk)
+  * [インターフェイス AwsSdkCall ·AWS CDK](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.custom_resources.AwsSdkCall.html)
 
 ```ts:main.ts
 import { Construct } from "constructs";
 import { App, TerraformStack } from "cdktf";
 import { AwsProvider } from "@cdktf/provider-aws/lib/provider";
 import { S3Bucket } from "@cdktf/provider-aws/lib/s3-bucket";
+import { S3Client, ListBucketsCommand } from "@aws-sdk/client-s3";
 
 class MyStack extends TerraformStack {
   constructor(scope: Construct, id: string) {
@@ -86,16 +189,22 @@ class MyStack extends TerraformStack {
       region: "ap-northeast-1",
     });
 
-    // バケットのリスト
-    const bucketList = [
-      "cdktf-test-web-20231024",
-      "cdktf-test-log-20231024",
-    ];
+    const importBuckets = async () => {
+      const client = new S3Client();
+      const input = {};
+      const command = new ListBucketsCommand(input);
+      const response = await client.send(command);
 
-    // すべてのバケットに対してインポートを実行
-    for (const bucketName of bucketList) {
-      new S3Bucket(this, bucketName, {}).importFrom(bucketName);
-    }
+      if (response && response.Buckets) {
+        // すべてのバケットに対してインポートを実行
+        for (const bucket of response.Buckets) {
+          const name = bucket.Name!;
+          new S3Bucket(this, name, {}).importFrom(name);
+        }
+      }
+    };
+
+    importBuckets();
   }
 }
 
@@ -104,322 +213,34 @@ new MyStack(app, "config-driven-import");
 app.synth();
 ```
 
-`cdktf diff`を実行すると、期待通り2つのバケットをインポートするplanが出力されます。
+## 参考
 
-<details><summary>output</summary>
+https://go-tech.blog/nodejs/ts-aws-sdk-s3/
 
-```bash
-$ cdktf diff
-config-driven-import  Initializing the backend...
-config-driven-import  Initializing provider plugins...
-config-driven-import  - Reusing previous version of hashicorp/aws from the dependency lock file
-config-driven-import  - Using previously-installed hashicorp/aws v5.22.0
+https://dev.classmethod.jp/articles/pre-signed-cdk-sdk-s3-api/#toc-13
 
-                      Terraform has been successfully initialized!
-config-driven-import  
-                      You may now begin working with Terraform. Try running "terraform plan" to see
-                      any changes that are required for your infrastructure. All Terraform commands
-                      should now work.
+# AWS SDKの認証
 
-                      If you ever set or change modules or backend configuration for Terraform,
-                      rerun this command to reinitialize your working directory. If you forget, other
-                      commands will detect it and remind you to do so if necessary.
-config-driven-import  aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Preparing import... [id=cdktf-test-log-20231024]
-config-driven-import  aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Preparing import... [id=cdktf-test-web-20231024]
-                      aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Refreshing state... [id=cdktf-test-log-20231024]
-                      aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Refreshing state... [id=cdktf-test-web-20231024]
-config-driven-import  Terraform will perform the following actions:
-config-driven-import    # aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024) will be imported
-                          resource "aws_s3_bucket" "cdktf-test-log-20231024" {
-                              arn                         = "arn:aws:s3:::cdktf-test-log-20231024"
-                              bucket                      = "cdktf-test-log-20231024"
-                              bucket_domain_name          = "cdktf-test-log-20231024.s3.amazonaws.com"
-                              bucket_regional_domain_name = "cdktf-test-log-20231024.s3.ap-northeast-1.amazonaws.com"
-                              hosted_zone_id              = "Z2M4EHUR26P7ZW"
-                              id                          = "cdktf-test-log-20231024"
-                              object_lock_enabled         = false
-                              region                      = "ap-northeast-1"
-                              request_payer               = "BucketOwner"
-                              tags                        = {}
-                              tags_all                    = {}
+* [AWS SDK for JavaScript v3](https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/Package/-aws-sdk-client-s3/Interface/Bucket/)
+* [@aws-sdk/credential-providers | AWS SDK for JavaScript v3](https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/modules/_aws_sdk_credential_providers.html)
+* [AWS SDK v3 における認証](https://zenn.dev/luma/articles/bd3c59b3d7682d)
+* [AWS SDK for JavaScript](https://aws.amazon.com/jp/sdk-for-javascript/)
+* [@aws-sdk/credential-providers - npm](https://www.npmjs.com/package/@aws-sdk/credential-providers#fromsso)
+* [Configuration and authentication settings reference - AWS SDKs and Tools](https://docs.aws.amazon.com/sdkref/latest/guide/settings-reference.html#EVarSettings)
 
-                              grant {
-                                  id          = "d03aad499a43b0490edc04b16d5e8673281a97f4127f8b0a8f2a3d6ff57c0598"
-                                  permissions = [
-                                      "FULL_CONTROL",
-                                  ]
-                                  type        = "CanonicalUser"
-                              }
+# リファクタリング
 
-                              server_side_encryption_configuration {
-                                  rule {
-                                      bucket_key_enabled = false
-
-                                      apply_server_side_encryption_by_default {
-                                          sse_algorithm = "AES256"
-                                      }
-                                  }
-                              }
-
-                              versioning {
-                                  enabled    = false
-                                  mfa_delete = false
-                              }
-                          }
-
-                        # aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024) will be imported
-                          resource "aws_s3_bucket" "cdktf-test-web-20231024" {
-                              arn                         = "arn:aws:s3:::cdktf-test-web-20231024"
-                              bucket                      = "cdktf-test-web-20231024"
-                              bucket_domain_name          = "cdktf-test-web-20231024.s3.amazonaws.com"
-                              bucket_regional_domain_name = "cdktf-test-web-20231024.s3.ap-northeast-1.amazonaws.com"
-                              hosted_zone_id              = "Z2M4EHUR26P7ZW"
-                              id                          = "cdktf-test-web-20231024"
-                              object_lock_enabled         = false
-                              region                      = "ap-northeast-1"
-                              request_payer               = "BucketOwner"
-                              tags                        = {}
-                              tags_all                    = {}
-
-                              grant {
-                                  id          = "d03aad499a43b0490edc04b16d5e8673281a97f4127f8b0a8f2a3d6ff57c0598"
-                                  permissions = [
-                                      "FULL_CONTROL",
-                                  ]
-                                  type        = "CanonicalUser"
-                              }
-
-                              server_side_encryption_configuration {
-                                  rule {
-                                      bucket_key_enabled = false
-
-                                      apply_server_side_encryption_by_default {
-                                          sse_algorithm = "AES256"
-                                      }
-                                  }
-                              }
-
-                              versioning {
-                                  enabled    = false
-                                  mfa_delete = false
-                              }
-                          }
-
-                      Plan: 2 to import, 0 to add, 0 to change, 0 to destroy.
-                      
-                      ─────────────────────────────────────────────────────────────────────────────
-
-                      Saved the plan to: plan
-
-                      To perform exactly these actions, run the following command to apply:
-                          terraform apply "plan
-
-```
-
-</details>
-
-`cdktf deploy`で、インポートを実行します。
-
-<details><summary>output</summary>
-
-```bash
-$ cdktf deploy
-config-driven-import  Initializing the backend...
-config-driven-import  Initializing provider plugins...
-config-driven-import  - Reusing previous version of hashicorp/aws from the dependency lock file
-config-driven-import  - Using previously-installed hashicorp/aws v5.22.0
-config-driven-import  Terraform has been successfully initialized!
-                      
-                      You may now begin working with Terraform. Try running "terraform plan" to see
-                      any changes that are required for your infrastructure. All Terraform commands
-                      should now work.
-
-                      If you ever set or change modules or backend configuration for Terraform,
-                      rerun this command to reinitialize your working directory. If you forget, other
-                      commands will detect it and remind you to do so if necessary.
-config-driven-import  aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Preparing import... [id=cdktf-test-log-20231024]
-config-driven-import  aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Preparing import... [id=cdktf-test-web-20231024]
-                      aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Refreshing state... [id=cdktf-test-web-20231024]
-                      aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Refreshing state... [id=cdktf-test-log-20231024]
-config-driven-import  Terraform will perform the following actions:
-config-driven-import    # aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024) will be imported
-                          resource "aws_s3_bucket" "cdktf-test-log-20231024" {
-                              arn                         = "arn:aws:s3:::cdktf-test-log-20231024"
-                              bucket                      = "cdktf-test-log-20231024"
-                              bucket_domain_name          = "cdktf-test-log-20231024.s3.amazonaws.com"
-                              bucket_regional_domain_name = "cdktf-test-log-20231024.s3.ap-northeast-1.amazonaws.com"
-                              hosted_zone_id              = "Z2M4EHUR26P7ZW"
-                              id                          = "cdktf-test-log-20231024"
-                              object_lock_enabled         = false
-                              region                      = "ap-northeast-1"
-                              request_payer               = "BucketOwner"
-                              tags                        = {}
-                              tags_all                    = {}
-
-                              grant {
-                                  id          = "d03aad499a43b0490edc04b16d5e8673281a97f4127f8b0a8f2a3d6ff57c0598"
-                                  permissions = [
-                                      "FULL_CONTROL",
-                                  ]
-                                  type        = "CanonicalUser"
-                              }
-
-                              server_side_encryption_configuration {
-                                  rule {
-                                      bucket_key_enabled = false
-
-                                      apply_server_side_encryption_by_default {
-                                          sse_algorithm = "AES256"
-                                      }
-                                  }
-                              }
-
-                              versioning {
-                                  enabled    = false
-                                  mfa_delete = false
-                              }
-                          }
-
-                        # aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024) will be imported
-                          resource "aws_s3_bucket" "cdktf-test-web-20231024" {
-                              arn                         = "arn:aws:s3:::cdktf-test-web-20231024"
-                              bucket                      = "cdktf-test-web-20231024"
-                              bucket_domain_name          = "cdktf-test-web-20231024.s3.amazonaws.com"
-                              bucket_regional_domain_name = "cdktf-test-web-20231024.s3.ap-northeast-1.amazonaws.com"
-                              hosted_zone_id              = "Z2M4EHUR26P7ZW"
-                              id                          = "cdktf-test-web-20231024"
-                              object_lock_enabled         = false
-                              region                      = "ap-northeast-1"
-                              request_payer               = "BucketOwner"
-                              tags                        = {}
-                              tags_all                    = {}
-
-                              grant {
-                                  id          = "d03aad499a43b0490edc04b16d5e8673281a97f4127f8b0a8f2a3d6ff57c0598"
-                                  permissions = [
-                                      "FULL_CONTROL",
-                                  ]
-                                  type        = "CanonicalUser"
-                              }
-
-                              server_side_encryption_configuration {
-                                  rule {
-                                      bucket_key_enabled = false
-
-                                      apply_server_side_encryption_by_default {
-                                          sse_algorithm = "AES256"
-                                      }
-                                  }
-                              }
-
-                              versioning {
-                                  enabled    = false
-                                  mfa_delete = false
-                              }
-                          }
-
-                      Plan: 2 to import, 0 to add, 0 to change, 0 to destroy.
-                      
-                      Do you want to perform these actions?
-                        Terraform will perform the actions described above.
-                        Only 'yes' will be accepted to approve.
-config-driven-import  Enter a value: yes
-config-driven-import
-config-driven-import  aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Importing... [id=cdktf-test-log-20231024]
-                      aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Import complete [id=cdktf-test-log-20231024]
-                      aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Importing... [id=cdktf-test-web-20231024]
-                      aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Import complete [id=cdktf-test-web-20231024]
-                      
-                      Apply complete! Resources: 2 imported, 0 added, 0 changed, 0 destroyed.
-
-No outputs found.
-```
-
-</details>
-
-インポートが完了したら、`importFrom`の呼び出しは不要なので、削除します。
-
-```diff_typescript:main.ts
-import { Construct } from "constructs";
-import { App, TerraformStack } from "cdktf";
-import { AwsProvider } from "@cdktf/provider-aws/lib/provider";
-import { S3Bucket } from "@cdktf/provider-aws/lib/s3-bucket";
-
-class MyStack extends TerraformStack {
-  constructor(scope: Construct, id: string) {
-    super(scope, id);
-
-    new AwsProvider(this, "AWS", {
-      region: "ap-northeast-1",
-    });
-
-    // バケットのリスト
-    const bucketList = [
-      "cdktf-test-web-20231024",
-      "cdktf-test-log-20231024",
-    ];
-
-    // すべてのバケットに対してインポートを実行
-    for (const bucketName of bucketList) {
--     new S3Bucket(this, bucketName, {}).importFrom(bucketName);        
-+     new S3Bucket(this, bucketName, {});
-    }
-  }
-}
-
-const app = new App();
-new MyStack(app, "config-driven-import");
-app.synth();
-```
-
-コードを変更したので、念のため、再度`cdktf diff`を実行します。
-
-<details><summary>output</summary>
-
-```bash
-$ cdktf diff
-config-driven-import  Initializing the backend...
-config-driven-import  Initializing provider plugins...
-                      - Reusing previous version of hashicorp/aws from the dependency lock file
-config-driven-import  - Using previously-installed hashicorp/aws v5.22.0
-config-driven-import  Terraform has been successfully initialized!
-                      
-                      You may now begin working with Terraform. Try running "terraform plan" to see
-                      any changes that are required for your infrastructure. All Terraform commands
-                      should now work.
-
-                      If you ever set or change modules or backend configuration for Terraform,
-                      rerun this command to reinitialize your working directory. If you forget, other
-                      commands will detect it and remind you to do so if necessary.
-config-driven-import  aws_s3_bucket.cdktf-test-web-20231024 (cdktf-test-web-20231024): Refreshing state... [id=cdktf-test-web-20231024]
-config-driven-import  aws_s3_bucket.cdktf-test-log-20231024 (cdktf-test-log-20231024): Refreshing state... [id=cdktf-test-log-20231024]
-config-driven-import  No changes. Your infrastructure matches the configuration.
-
-                      
-config-driven-import  Terraform has compared your real infrastructure against your configuration
-                      and found no differences, so no changes are needed.
-```
-
-</details>
-
-期待通りに`No changes.`が出力され、コードとバケットの同期がとれていることがわかります。
-
-
-
-# 複数バケットを一括インポートする (AWS SDK使用)
-
+https://developer.hashicorp.com/terraform/cdktf/test/unit-tests
+ 
+https://zenn.dev/uta_mory/scraps/98d7236c185dde
 
 
 # スナップショットテストによるガード
 
 
-# リファクタリング
-
-
-
 ## AWS SDKのインストール
 
-次に、動的にバケットを列挙するため、AWS SDKをインストールします。
+次に、動的にバケットを列挙するため、AWS SDK をインストールします。
 
 ```bash
 npm install @aws-sdk/client-s3
@@ -431,7 +252,6 @@ https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/client/s3/
 
 
 # バケットをCDKTFで構成変更する
-
 
 
 ----
@@ -452,7 +272,7 @@ cdktf init --template="typescript" --providers="aws@~>5.0" --local
 
 ## AWS資格情報の設定
 
-AWSプロバイダーに資格情報を渡す方法は複数ありますが、今回は、プロファイルと環境変数AWS_PROFILEを使用します。
+AWS プロバイダーに資格情報を渡す方法は複数ありますが、今回は、プロファイルと環境変数 AWS_PROFILE を使用します。
 
 ```bash
 export AWS_PROFILE=<profile name>
@@ -652,7 +472,7 @@ config-driven-import
 No outputs found.
 ```
 
-Terraformの構成ファイルと実際のバケットの状態に差異がないか、確認します。
+Terraform の構成ファイルと実際のバケットの状態に差異がないか、確認します。
 
 ```bash
 cdktf diff
