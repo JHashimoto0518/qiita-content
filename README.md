@@ -1,4 +1,5 @@
 # qiita-content
+
 This is a repository for managing Qiita articles.
 
 ## 利用方法のメモ
@@ -6,20 +7,20 @@ This is a repository for managing Qiita articles.
 [Qiitaの記事をGitHubリポジトリで管理する方法 #GitHub - Qiita](https://qiita.com/Qiita/items/32c79014509987541130)
 
 1. 作業ディレクトリの初期化
-   
+
     ```bash
     npx qiita init 
     ```
 
-1. pushする
-   
+1. push する
+
     ```bash
     git push
     ```
 
-    mainへのpushで、ワークフローがトリガーされる
-    
-    1. リモートリポジトリmainブランチの`public/`に既存コンテンツが作成される
-    1. 作業ディレクトリの`public/`にpullされる
+main への push で、ワークフローがトリガーされる
 
-    pushの前に、`npx qiita preview`をしないこと。既存コンテンツがダウンロードされるため、リモートと作業ディレクトリで差分が生じ、pushに失敗する。
+1. リモートリポジトリ main ブランチの`public/`に既存コンテンツが作成される
+2. 作業ディレクトリの`public/`に pull される
+
+push の前に、`npx qiita preview`をしないこと。既存コンテンツがダウンロードされるため、リモートと作業ディレクトリで差分が生じ、push に失敗する。
