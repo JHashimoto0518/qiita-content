@@ -24,3 +24,7 @@ main への push で、ワークフローがトリガーされる
 2. 作業ディレクトリの`public/`に pull される
 
 push の前に、`npx qiita preview`をしないこと。既存コンテンツがダウンロードされるため、リモートと作業ディレクトリで差分が生じ、push に失敗する。
+
+## Qiita CLI の使い方
+
+[qiita-cli/README](https://github.com/increments/qiita-cli/blob/main/README.md)
